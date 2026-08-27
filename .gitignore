@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local environments and configuration
+.env
+.env.*
+.venv/
+venv/
+env/
+
+# Build and runtime output
+build/
+dist/
+*.egg-info/
+mcstudio_bridge/bin/*
+!mcstudio_bridge/bin/.gitkeep
+.runtime/
+*.log
+*.obj
+*.pdb
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local screenshots and temporary captures
+PixPin_*.png
+runtime_dump_*
+
+# Local working notes
+docs/
+tests/
