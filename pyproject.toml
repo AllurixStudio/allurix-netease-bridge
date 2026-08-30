@@ -13,9 +13,10 @@ dependencies = ["mcp>=2,<3"]
 
 [project.scripts]
 allurix-mcp-proxy = "mcp_proxy:main"
+allurix-mcp-stdio = "mcp_stdio_client:main"
 
 [tool.setuptools]
-py-modules = ["mcp_proxy"]
+py-modules = ["mcp_proxy", "mcp_stdio_client"]
 
 [tool.setuptools.packages.find]
 include = ["apollo_core*"]

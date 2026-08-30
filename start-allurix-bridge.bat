@@ -1,8 +1,13 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
+cd /d "%~dp0"
 
 if not defined MCSTUDIO_EXE set "MCSTUDIO_EXE=D:\MCStudio\MCStudio.exe"
+if not defined PYTHON_EXE set "PYTHON_EXE=C:\Python314\python.exe"
 set "BRIDGE_ROOT=%~dp0mcstudio_bridge"
+set "PROXY=%~dp0mcp_proxy.py"
+set "STDIO_CLIENT=%~dp0mcp_stdio_client.py"
+set "PROXY_LOG=%TEMP%\allurix_mcp_proxy.log"
 set "INJECTOR=%BRIDGE_ROOT%\bin\Allurix.MCStudio.Injector.exe"
 set "BOOTSTRAP=%BRIDGE_ROOT%\bin\BRegister.dll"
 set "BRIDGE=%BRIDGE_ROOT%\bin\allurix-mcs-bridge.dll"
@@ -12,6 +17,12 @@ set "NEW_LOG=%TEMP%\allurix_bridge_inject_%RANDOM%_%RANDOM%.log"
 if not exist "%INJECTOR%" goto :missing_injector
 if not exist "%BOOTSTRAP%" goto :missing_bootstrap
 if not exist "%BRIDGE%" goto :missing_bridge
+if not exist "%PROXY%" goto :missing_proxy
+if not exist "%STDIO_CLIENT%" goto :missing_stdio_client
+if not exist "%PYTHON_EXE%" goto :missing_python
+
+call :ensure_proxy
+if errorlevel 1 goto :proxy_failed
 
 tasklist /FI "IMAGENAME eq MCStudio.exe" 2>nul | find /I "MCStudio.exe" >nul
 if errorlevel 1 (
@@ -76,6 +87,10 @@ del /q "%NEW_LOG%" 2>nul
 echo Allurix MCP bridge is ready.
 exit /b 0
 
+:ensure_proxy
+"%PYTHON_EXE%" -c "from pathlib import Path; from mcp_stdio_client import ensure_proxy; raise SystemExit(0 if ensure_proxy('http://127.0.0.1:19132/mcp', Path(r'%PROXY%'), 'http://127.0.0.1:19131/sse') else 1)"
+exit /b %ERRORLEVEL%
+
 :missing_injector
 echo ERROR: Injector not found: "%INJECTOR%"
 exit /b 1
@@ -86,6 +101,18 @@ exit /b 1
 
 :missing_bridge
 echo ERROR: Bridge DLL not found: "%BRIDGE%"
+exit /b 1
+
+:missing_proxy
+echo ERROR: MCP proxy not found: "%PROXY%"
+exit /b 1
+
+:missing_stdio_client
+echo ERROR: MCP stdio client not found: "%STDIO_CLIENT%"
+exit /b 1
+
+:missing_python
+echo ERROR: Python not found: "%PYTHON_EXE%"
 exit /b 1
 
 :missing_mcstudio
@@ -103,6 +130,11 @@ exit /b 1
 
 :injector_failed
 echo ERROR: Injector failed.
+exit /b 1
+
+:proxy_failed
+echo ERROR: Allurix MCP proxy did not listen on port 19132.
+echo Check "%PROXY_LOG%".
 exit /b 1
 
 :bootstrap_failed

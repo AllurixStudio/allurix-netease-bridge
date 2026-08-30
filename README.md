@@ -1,8 +1,7 @@
 # Allurix MCStudio MCP Bridge
 
 A Windows-only local bridge that exposes MCStudio Apollo projects, logs, and
-operations through a Codex-owned stdio MCP proxy with a local legacy SSE
-endpoint.
+operations through one local MCP proxy shared by Codex and the Web Manager.
 
 Allurix runs inside MCStudio and uses MCStudio's loaded Apollo project model.
 MCP clients do not receive Apollo credentials and do not replay authenticated
@@ -12,11 +11,15 @@ Apollo HTTP requests.
 
 ```text
 Codex
-  -> starts mcp_proxy.py and uses MCP stdio
-  -> stable local allurix_bridge tool
+  -> lightweight mcp_stdio_client.py per task
+  -> Streamable HTTP at 127.0.0.1:19132/mcp
+  -> stable shared allurix_bridge tool
+
+Web Manager
+  -> legacy SSE at 127.0.0.1:19132/sse
 
 mcp_proxy.py
-  -> legacy SSE MCP at 127.0.0.1:19132/sse
+  -> one shared BridgeSupervisor and generation
   -> legacy SSE client to 127.0.0.1:19131/sse
   -> injected MCStudio allurix_bridge
   -> tool DLLs in mcstudio_bridge/bin/tools
@@ -25,17 +28,20 @@ mcp_proxy.py
 
 `BRegister.dll` is injected into the MCStudio process that owns port `19131`.
 It stops the native MCP server, registers `allurix_bridge`, and starts the
-native server again. Codex starts `mcp_proxy.py` through stdio. The proxy
-registers its local `allurix_bridge` tool before attempting any upstream
-connection, starts legacy SSE on `19132/sse`, then connects to the native
-legacy SSE server on `19131/sse` in the background.
+native server again. `start-allurix-bridge.bat` starts one `mcp_proxy.py`
+service if port `19132` is not already listening. The service exposes
+Streamable HTTP on `/mcp`, keeps `/sse` for Web Manager compatibility, and
+connects to the native legacy SSE server on `19131/sse` in the background.
+When Codex starts first, `mcp_stdio_client.py` uses a cross-process lock to
+start the same singleton service automatically. Per-task stdio adapters never
+connect to `19131` and never own bridge state.
 
-The supervisor states are `starting`, `connecting`, `waiting_for_bridge`,
-`ready`, `stopping`, and `stopped`. Calls made before readiness immediately
-return `bridge_not_loaded`. Calls interrupted by an upstream failure return
-`upstream_disconnected` and are never replayed. Reconnect delays are 0.5, 1,
-2, then 5 seconds. The outer MCP tool list stays fixed at the single
-`allurix_bridge` tool while the upstream session reconnects.
+The supervisor states are `starting`, `waiting_for_sse`,
+`waiting_for_bridge`, `ready`, `suspended`, `stopping`, and `stopped`.
+Read-only calls wait up to 60 seconds for recovery; state-changing calls fail
+immediately and are never replayed. Reconnect delays are 0.5, 1, 2, then 5
+seconds. Every client observes the same generation, session, tool cache, and
+fixed `allurix_bridge` tool.
 
 Apollo HTTP is not an MCP fallback. All MCP operations go through the injected
 bridge and MCStudio's in-process state.
@@ -80,13 +86,12 @@ start-allurix-bridge.bat
 
 The script performs this sequence:
 
-1. Starts MCStudio if it is not already running.
-2. Waits for MCStudio's native MCP server on port `19131`.
-3. Finds the MCStudio process that owns port `19131`.
-4. Injects `BRegister.dll` into that exact process.
-5. Waits for the bootstrap to register `allurix_bridge` and restart native MCP.
-
-The script does not start or stop `mcp_proxy.py`; Codex owns that process.
+1. Starts the singleton MCP proxy on port `19132` if needed.
+2. Starts MCStudio if it is not already running.
+3. Waits for MCStudio's native MCP server on port `19131`.
+4. Finds the MCStudio process that owns port `19131`.
+5. Injects `BRegister.dll` into that exact process.
+6. Waits for the bootstrap to register `allurix_bridge` and restart native MCP.
 
 After changing `AllurixBridge.cs`, `BRegister.cpp`, or the injector, restart
 MCStudio before rebuilding and injecting. Windows keeps those loaded binaries
@@ -95,10 +100,10 @@ locked. Tool DLLs are loaded from bytes and can be refreshed with the bridge's
 
 ## Connect Codex
 
-Register the local stdio proxy:
+Register the lightweight stdio adapter:
 
 ```powershell
-codex mcp add allurix-bridge -- C:\Python314\python.exe D:\_Development\_Nightbreak\allurix-netease-mcp\mcp_proxy.py --upstream http://127.0.0.1:19131/sse --sse-host 127.0.0.1 --sse-port 19132 --sse-path /sse
+codex mcp add allurix-bridge -- C:\Python314\python.exe D:\_Development\_Nightbreak\allurix-netease-mcp\mcp_stdio_client.py --proxy-url http://127.0.0.1:19132/mcp
 codex mcp list
 ```
 
@@ -111,19 +116,17 @@ Equivalent `~/.codex/config.toml` configuration:
 [mcp_servers.allurix-bridge]
 command = "C:\\Python314\\python.exe"
 args = [
-  "D:\\_Development\\_Nightbreak\\allurix-netease-mcp\\mcp_proxy.py",
-  "--upstream", "http://127.0.0.1:19131/sse",
-  "--sse-host", "127.0.0.1",
-  "--sse-port", "19132",
-  "--sse-path", "/sse"
+  "D:\\_Development\\_Nightbreak\\allurix-netease-mcp\\mcp_stdio_client.py",
+  "--proxy-url", "http://127.0.0.1:19132/mcp"
 ]
 startup_timeout_sec = 10
 tool_timeout_sec = 120
 ```
 
-`127.0.0.1:19132/sse` is a legacy SSE endpoint. It
-does not expose a `/messages/` endpoint. Port `19131` remains MCStudio's legacy
-SSE endpoint.
+`127.0.0.1:19132/mcp` is the Codex Streamable HTTP endpoint.
+`127.0.0.1:19132/sse` remains available for legacy clients. Port `19131` is
+only the proxy's MCStudio upstream and must not be configured as a Codex MCP
+server.
 
 ## Call shape
 
@@ -280,9 +283,9 @@ Check the listener:
 netstat -ano | findstr :19132
 ```
 
-Port `19132` is owned by the Codex-started `mcp_proxy.py` process. A bind
-failure is logged and retried with backoff; Codex stdio remains available
-during the retry loop.
+Port `19132` must have exactly one `mcp_proxy.py` listener. Stop stale proxy
+processes before starting the service again. Upstream reconnects happen inside
+that process and do not replace the listener.
 
 ### An operation is queued but nothing starts
 
@@ -311,7 +314,8 @@ C++/CLI bootstrap.
 ## Repository layout
 
 ```text
-mcp_proxy.py          Current Codex stdio + legacy SSE proxy
+mcp_proxy.py          Singleton Streamable HTTP + legacy SSE proxy
+mcp_stdio_client.py   Lightweight Codex stdio adapter and singleton launcher
 apollo_core/          Explicit read-oriented Apollo helpers
 mcstudio_bridge/      Bridge, injector, bootstrapper, and MCP tool sources
 ```
