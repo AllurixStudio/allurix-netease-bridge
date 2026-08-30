@@ -29,6 +29,7 @@ cl /nologo /utf-8 /LD /clr /Fe:"%OUT%\BRegister.dll" mcstudio_bridge\BRegister.c
 
 call :tool ClearTool clear
 call :tool ClientLogsTool client_logs
+call :uia_tool ConfirmRedeployTool confirm_redeploy
 call :tool DeployLogsTool deploy_logs
 call :tool DevelopmentTestTool development_test
 call :tool HotfixTool hotfix
@@ -42,4 +43,13 @@ exit /b 0
 
 :tool
 csc /nologo /target:library /platform:x86 /reference:"%MCP_ASSEMBLY%" /out:"%TOOLS%\%~2.dll" "mcstudio_bridge\tools\%~1.cs" "mcstudio_bridge\tools\ApolloToolHelpers.cs" || exit /b 1
+exit /b 0
+
+:uia_tool
+if not defined UIA_REF_DIR set "UIA_REF_DIR=%ProgramFiles(x86)%\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2"
+if not exist "%UIA_REF_DIR%\UIAutomationClient.dll" (
+    echo ERROR: UIAutomationClient.dll not found. Set UIA_REF_DIR first.
+    exit /b 1
+)
+csc /nologo /target:library /platform:x86 /reference:"%MCP_ASSEMBLY%" /reference:"%UIA_REF_DIR%\UIAutomationClient.dll" /reference:"%UIA_REF_DIR%\UIAutomationTypes.dll" /out:"%TOOLS%\%~2.dll" "mcstudio_bridge\tools\%~1.cs" "mcstudio_bridge\tools\ApolloToolHelpers.cs" || exit /b 1
 exit /b 0

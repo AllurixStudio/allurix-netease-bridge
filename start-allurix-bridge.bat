@@ -6,16 +6,12 @@ set "BRIDGE_ROOT=%~dp0mcstudio_bridge"
 set "INJECTOR=%BRIDGE_ROOT%\bin\Allurix.MCStudio.Injector.exe"
 set "BOOTSTRAP=%BRIDGE_ROOT%\bin\BRegister.dll"
 set "BRIDGE=%BRIDGE_ROOT%\bin\allurix-mcs-bridge.dll"
-set "STREAMABLE_PROXY=%~dp0mcp_streamable_proxy.py"
-set "STREAMABLE_PORT=19132"
-set "STREAMABLE_LOG=%TEMP%\allurix_streamable_proxy.log"
 set "BOOTSTRAP_LOG=%BRIDGE_ROOT%\bin\allurix_bootstrap.log"
 set "NEW_LOG=%TEMP%\allurix_bridge_inject_%RANDOM%_%RANDOM%.log"
 
 if not exist "%INJECTOR%" goto :missing_injector
 if not exist "%BOOTSTRAP%" goto :missing_bootstrap
 if not exist "%BRIDGE%" goto :missing_bridge
-if not exist "%STREAMABLE_PROXY%" goto :missing_proxy
 
 tasklist /FI "IMAGENAME eq MCStudio.exe" 2>nul | find /I "MCStudio.exe" >nul
 if errorlevel 1 (
@@ -77,24 +73,8 @@ goto :verify_injection
 :success
 for /f "usebackq tokens=*" %%L in (`findstr /C:"=== DONE! Status:" "%NEW_LOG%"`) do echo %%L
 del /q "%NEW_LOG%" 2>nul
-call :ensure_streamable_proxy
-if errorlevel 1 goto :proxy_failed
 echo Allurix MCP bridge is ready.
 exit /b 0
-
-:ensure_streamable_proxy
-netstat -ano -p tcp 2>nul | findstr /R /C:":%STREAMABLE_PORT% .*LISTENING" >nul
-if not errorlevel 1 exit /b 0
-echo Starting Streamable HTTP adapter on port %STREAMABLE_PORT%...
-start "" /b py -3 "%STREAMABLE_PROXY%" --host 127.0.0.1 --port %STREAMABLE_PORT% --upstream http://127.0.0.1:19131/sse >> "%STREAMABLE_LOG%" 2>&1
-set /a PROXY_WAIT_COUNT=0
-:wait_for_streamable_proxy
-netstat -ano -p tcp 2>nul | findstr /R /C:":%STREAMABLE_PORT% .*LISTENING" >nul
-if not errorlevel 1 exit /b 0
-set /a PROXY_WAIT_COUNT+=1
-if !PROXY_WAIT_COUNT! geq 30 exit /b 1
->nul ping 127.0.0.1 -n 2
-goto :wait_for_streamable_proxy
 
 :missing_injector
 echo ERROR: Injector not found: "%INJECTOR%"
@@ -106,10 +86,6 @@ exit /b 1
 
 :missing_bridge
 echo ERROR: Bridge DLL not found: "%BRIDGE%"
-exit /b 1
-
-:missing_proxy
-echo ERROR: Streamable HTTP adapter not found: "%STREAMABLE_PROXY%"
 exit /b 1
 
 :missing_mcstudio
@@ -127,11 +103,6 @@ exit /b 1
 
 :injector_failed
 echo ERROR: Injector failed.
-exit /b 1
-
-:proxy_failed
-echo ERROR: Streamable HTTP adapter did not listen on port %STREAMABLE_PORT%.
-echo Check "%STREAMABLE_LOG%".
 exit /b 1
 
 :bootstrap_failed

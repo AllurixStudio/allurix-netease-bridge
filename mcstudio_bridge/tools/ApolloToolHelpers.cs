@@ -122,6 +122,58 @@ internal static class ApolloToolHelpers
         return true;
     }
 
+    internal static bool InvokeOnUi(Action action, out string error)
+    {
+        error = null;
+        try
+        {
+            Assembly framework = FindAssembly("PresentationFramework");
+            Type appType = framework == null ? null : framework.GetType("System.Windows.Application");
+            object app = appType == null ? null : ReadMember(appType, null, "Current", true);
+            object dispatcher = app == null ? null : ReadMember(app.GetType(), app, "Dispatcher", false);
+            if (dispatcher == null) { error = "Application dispatcher unavailable"; return false; }
+
+            object access = ReadMember(dispatcher.GetType(), dispatcher, "CheckAccess", false);
+            if (access is bool && (bool)access)
+            {
+                action();
+                return true;
+            }
+
+            foreach (MethodInfo method in dispatcher.GetType().GetMethods(
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                if (method.Name != "Invoke") continue;
+                ParameterInfo[] parameters = method.GetParameters();
+                if (parameters.Length == 1 && AcceptsAction(parameters[0].ParameterType))
+                {
+                    method.Invoke(dispatcher, new object[] { action });
+                    return true;
+                }
+                if (parameters.Length == 2 && AcceptsAction(parameters[0].ParameterType) &&
+                    parameters[1].ParameterType == typeof(object[]))
+                {
+                    method.Invoke(dispatcher, new object[] { action, new object[0] });
+                    return true;
+                }
+            }
+
+            error = "Dispatcher.Invoke overload not found";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            error = ex.GetType().Name + ": " + ex.Message;
+            if (ex.InnerException != null) error += " | " + ex.InnerException.Message;
+            return false;
+        }
+    }
+
+    private static bool AcceptsAction(Type type)
+    {
+        return type == typeof(Delegate) || type == typeof(Action) || type.IsAssignableFrom(typeof(Action));
+    }
+
     internal static object FindProject(Assembly mcStudio, int apolloId)
     {
         if (mcStudio == null) return null;

@@ -12,10 +12,10 @@ requires-python = ">=3.10"
 dependencies = ["mcp>=2,<3"]
 
 [project.scripts]
-allurix-mcp-proxy = "mcp_streamable_proxy:main"
+allurix-mcp-proxy = "mcp_proxy:main"
 
 [tool.setuptools]
-py-modules = ["mcp_streamable_proxy"]
+py-modules = ["mcp_proxy"]
 
 [tool.setuptools.packages.find]
 include = ["apollo_core*"]

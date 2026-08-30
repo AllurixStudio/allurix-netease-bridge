@@ -1,7 +1,8 @@
 # Allurix MCStudio MCP Bridge
 
 A Windows-only local bridge that exposes MCStudio Apollo projects, logs, and
-operations to MCP clients through Streamable HTTP.
+operations through a Codex-owned stdio MCP proxy with a local Streamable HTTP
+endpoint.
 
 Allurix runs inside MCStudio and uses MCStudio's loaded Apollo project model.
 MCP clients do not receive Apollo credentials and do not replay authenticated
@@ -10,18 +11,31 @@ Apollo HTTP requests.
 ## Architecture
 
 ```text
-MCP client
-  -> Streamable HTTP proxy (127.0.0.1:19132/mcp)
-  -> MCStudio native SSE MCP (127.0.0.1:19131/sse)
-  -> injected allurix_bridge
+Codex
+  -> starts mcp_proxy.py and uses MCP stdio
+  -> stable local allurix_bridge tool
+
+mcp_proxy.py
+  -> Streamable HTTP MCP at 127.0.0.1:19132/sse
+  -> legacy SSE client to 127.0.0.1:19131/sse
+  -> injected MCStudio allurix_bridge
   -> tool DLLs in mcstudio_bridge/bin/tools
   -> MCStudio Apollo project state
 ```
 
 `BRegister.dll` is injected into the MCStudio process that owns port `19131`.
 It stops the native MCP server, registers `allurix_bridge`, and starts the
-native server again. The Python proxy adapts the native SSE transport to the
-current Streamable HTTP transport at `http://127.0.0.1:19132/mcp`.
+native server again. Codex starts `mcp_proxy.py` through stdio. The proxy
+registers its local `allurix_bridge` tool before attempting any upstream
+connection, starts Streamable HTTP on `19132/sse`, then connects to the native
+legacy SSE server on `19131/sse` in the background.
+
+The supervisor states are `starting`, `connecting`, `waiting_for_bridge`,
+`ready`, `stopping`, and `stopped`. Calls made before readiness immediately
+return `bridge_not_loaded`. Calls interrupted by an upstream failure return
+`upstream_disconnected` and are never replayed. Reconnect delays are 0.5, 1,
+2, then 5 seconds. The outer MCP tool list stays fixed at the single
+`allurix_bridge` tool while the upstream session reconnects.
 
 Apollo HTTP is not an MCP fallback. All MCP operations go through the injected
 bridge and MCStudio's in-process state.
@@ -71,8 +85,8 @@ The script performs this sequence:
 3. Finds the MCStudio process that owns port `19131`.
 4. Injects `BRegister.dll` into that exact process.
 5. Waits for the bootstrap to register `allurix_bridge` and restart native MCP.
-6. Starts the Streamable HTTP proxy on port `19132` if it is not already
-   listening.
+
+The script does not start or stop `mcp_proxy.py`; Codex owns that process.
 
 After changing `AllurixBridge.cs`, `BRegister.cpp`, or the injector, restart
 MCStudio before rebuilding and injecting. Windows keeps those loaded binaries
@@ -81,10 +95,10 @@ locked. Tool DLLs are loaded from bytes and can be refreshed with the bridge's
 
 ## Connect Codex
 
-Register the local Streamable HTTP endpoint:
+Register the local stdio proxy:
 
 ```powershell
-codex mcp add allurix-bridge --url http://127.0.0.1:19132/mcp
+codex mcp add allurix-bridge -- C:\Python314\python.exe D:\_Development\_Nightbreak\allurix-netease-mcp\mcp_proxy.py --upstream http://127.0.0.1:19131/sse --http-host 127.0.0.1 --http-port 19132 --http-path /sse
 codex mcp list
 ```
 
@@ -95,11 +109,21 @@ Equivalent `~/.codex/config.toml` configuration:
 
 ```toml
 [mcp_servers.allurix-bridge]
-url = "http://127.0.0.1:19132/mcp"
+command = "C:\\Python314\\python.exe"
+args = [
+  "D:\\_Development\\_Nightbreak\\allurix-netease-mcp\\mcp_proxy.py",
+  "--upstream", "http://127.0.0.1:19131/sse",
+  "--http-host", "127.0.0.1",
+  "--http-port", "19132",
+  "--http-path", "/sse"
+]
+startup_timeout_sec = 10
+tool_timeout_sec = 120
 ```
 
-Use port `19132` for normal MCP clients. Port `19131` is MCStudio's native
-legacy SSE endpoint and is the proxy's upstream connection.
+`127.0.0.1:19132/sse` is a Streamable HTTP endpoint despite its path name. It
+does not expose a `/messages/` endpoint. Port `19131` remains MCStudio's legacy
+SSE endpoint.
 
 ## Call shape
 
@@ -128,6 +152,7 @@ hardcode an Apollo project ID or assume that lobby/game node counts are fixed.
 | `projects` | `{}` | Lists Apollo projects and all currently known lobby, game, master, service, and proxy nodes. |
 | `logs` | `apollo_id`, `server_id`, optional `lines`, `offset` | Reads Apollo server logs. Use `lines: -200, offset: -1` for the latest window. |
 | `client_logs` | optional `tail_lines` | Reads the latest 1-1000 lines from MCStudio's local-client log buffer; default 200. |
+| `confirm_redeploy` | `apollo_id`, `confirmation` | Confirms the visible MCStudio redeploy dialog in-process; no mouse or keyboard automation. |
 | `live_logs` | optional `server_id` | Reads the Server Log window currently open in MCStudio. If supplied, `server_id` must match that window. |
 | `deploy_logs` | `apollo_id` | Reads deployment activity/history available in the loaded project. |
 | `hotfix` | `apollo_id`, `confirmation`, optional `client` | Queues server hotfix, or client hotfix when `client: true`. |
@@ -198,14 +223,24 @@ is rejected with `未锁定服务器控制权，请锁定后重试。`:
 {"tool":"redeploy","arguments":{"apollo_id":12345,"confirmation":"REDEPLOY 12345"}}
 ```
 
+After the native redeploy confirmation dialog appears, confirm it in-process:
+
+```json
+{"tool":"confirm_redeploy","arguments":{"apollo_id":12345,"confirmation":"CONFIRM REDEPLOY 12345"}}
+```
+
+The confirmation tool only accepts the visible MCStudio redeploy dialog. It
+invokes the unique enabled `确定` button through Windows UI Automation and
+never uses mouse, keyboard, or Computer Use automation.
+
 A `request_queued` response means the operation was submitted to MCStudio's UI
 Dispatcher. It does not claim that the operation completed; observe MCStudio
 and the relevant logs for completion.
 
-The Streamable HTTP proxy may reconnect and retry read-only calls after a stale
-native SSE session. It does not automatically retry `hotfix`,
-`development_test`, `clear`, or `redeploy`, because replaying a state-changing
-request could run it twice.
+The adapter reconnects after a stale native SSE session, but never replays the
+interrupted call. The caller receives `upstream_disconnected`; a later call is
+forwarded after recovery. This applies equally to read and state-changing
+commands, preventing ambiguous duplicate execution.
 
 ## Troubleshooting
 
@@ -245,12 +280,9 @@ Check the listener:
 netstat -ano | findstr :19132
 ```
 
-Port `19132` must be free or already owned by this project's
-`mcp_streamable_proxy.py`. Proxy output is written to:
-
-```text
-%TEMP%\allurix_streamable_proxy.log
-```
+Port `19132` is owned by the Codex-started `mcp_proxy.py` process. A bind
+failure is logged and retried with backoff; Codex stdio remains available
+during the retry loop.
 
 ### An operation is queued but nothing starts
 
@@ -270,7 +302,7 @@ Run the local checks:
 
 ```powershell
 py -3 -m unittest discover -s tests -v
-py -3 -m compileall -q apollo_core mcp_streamable_proxy.py
+py -3.14 -m compileall -q apollo_core mcp_proxy.py
 ```
 
 Build validation covers the x86 C# bridge, injector, all tool DLLs, and the
@@ -279,8 +311,9 @@ C++/CLI bootstrap.
 ## Repository layout
 
 ```text
-apollo_core/       Explicit read-oriented Apollo helpers
-mcstudio_bridge/   Bridge, injector, bootstrapper, and MCP tool sources
+mcp_proxy.py          Current Codex stdio + Streamable HTTP proxy
+apollo_core/          Explicit read-oriented Apollo helpers
+mcstudio_bridge/      Bridge, injector, bootstrapper, and MCP tool sources
 ```
 
 Build output, runtime logs, local notes, tests, local captures, and editor
