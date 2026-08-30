@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -26,8 +27,11 @@ _STATE_STARTING = "starting"
 _STATE_CONNECTING = "connecting"
 _STATE_WAITING_FOR_BRIDGE = "waiting_for_bridge"
 _STATE_READY = "ready"
+_STATE_SUSPENDED = "suspended"
 _STATE_STOPPING = "stopping"
 _STATE_STOPPED = "stopped"
+_PROXY_SUSPEND = "_proxy_suspend"
+_PROXY_RESUME = "_proxy_resume"
 
 
 @dataclass
@@ -54,6 +58,7 @@ class BridgeSupervisor:
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
         self._retry_index = 0
+        self._suspended_until = 0.0
 
     async def start(self) -> None:
         if self._worker is not None and not self._worker.done():
@@ -81,7 +86,8 @@ class BridgeSupervisor:
         await self.start()
         if self.state in (_STATE_STOPPING, _STATE_STOPPED):
             return self._error("proxy_stopping", "Allurix MCP Proxy 正在停止")
-        if not self._ready.is_set():
+        control = tool in (_PROXY_SUSPEND, _PROXY_RESUME)
+        if not control and not self._ready.is_set():
             return self._not_loaded()
 
         reply: asyncio.Future[str] = asyncio.get_running_loop().create_future()
@@ -93,6 +99,27 @@ class BridgeSupervisor:
     async def _run(self) -> None:
         try:
             while not self._stop.is_set():
+                try:
+                    request = self._requests.get_nowait()
+                except asyncio.QueueEmpty:
+                    request = None
+                if request is not None:
+                    await self._execute(request)
+                    continue
+
+                if self.state == _STATE_SUSPENDED:
+                    if time.monotonic() >= self._suspended_until:
+                        self.state = _STATE_CONNECTING
+                        continue
+                    try:
+                        request = await asyncio.wait_for(self._requests.get(), timeout=1)
+                    except asyncio.TimeoutError:
+                        continue
+                    if request is None:
+                        break
+                    await self._execute(request)
+                    continue
+
                 if not self._ready.is_set():
                     if await self._connect_once():
                         continue
@@ -179,6 +206,20 @@ class BridgeSupervisor:
             self.state = _STATE_CONNECTING
 
     async def _execute(self, request: _BridgeRequest) -> None:
+        if request.tool == _PROXY_SUSPEND:
+            seconds = max(1.0, min(float((request.arguments or {}).get("seconds", 60)), 300.0))
+            self._suspended_until = time.monotonic() + seconds
+            await self._disconnect()
+            self.state = _STATE_SUSPENDED
+            self._set_reply(request, json.dumps({"ok": True, "state": self.state}, ensure_ascii=False))
+            return
+        if request.tool == _PROXY_RESUME:
+            self._suspended_until = 0.0
+            await self._disconnect()
+            self.state = _STATE_CONNECTING
+            self._set_reply(request, json.dumps({"ok": True, "state": self.state}, ensure_ascii=False))
+            return
+
         session = self._session
         if session is None or not self._ready.is_set():
             self._set_reply(request, self._not_loaded())
@@ -295,14 +336,14 @@ def build_mcp_server(bridge: BridgeSupervisor, name: str) -> MCPServer:
     return server
 
 
-def build_streamable_http_server(
+def build_sse_server(
     bridge: BridgeSupervisor,
     host: str,
     port: int,
     path: str,
 ) -> uvicorn.Server:
-    server = build_mcp_server(bridge, "allurix-bridge-http")
-    app = server.streamable_http_app(streamable_http_path=path, host=host)
+    server = build_mcp_server(bridge, "allurix-bridge-sse")
+    app = server.sse_app(sse_path=path, message_path="/messages/", host=host)
     config = uvicorn.Config(
         app,
         host=host,
@@ -313,8 +354,8 @@ def build_streamable_http_server(
     return uvicorn.Server(config)
 
 
-class StreamableHttpEndpoint:
-    """Keep the optional local HTTP endpoint alive without owning stdio."""
+class SseEndpoint:
+    """Keep the local SSE endpoint alive without owning stdio."""
 
     def __init__(self, bridge: BridgeSupervisor, host: str, port: int, path: str) -> None:
         self.bridge = bridge
@@ -330,7 +371,7 @@ class StreamableHttpEndpoint:
         if self._worker is not None and not self._worker.done():
             return
         self._stop.clear()
-        self._worker = asyncio.create_task(self._run(), name="allurix-streamable-http")
+        self._worker = asyncio.create_task(self._run(), name="allurix-sse")
 
     async def close(self) -> None:
         self._stop.set()
@@ -343,7 +384,7 @@ class StreamableHttpEndpoint:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                server = build_streamable_http_server(self.bridge, self.host, self.port, self.path)
+                server = build_sse_server(self.bridge, self.host, self.port, self.path)
                 self._server = server
                 await server.serve()
                 self._retry_index = 0
@@ -351,7 +392,7 @@ class StreamableHttpEndpoint:
                 raise
             except BaseException as exc:
                 logging.getLogger(__name__).error(
-                    "Streamable HTTP endpoint failed: http://%s:%s%s (%s: %s)",
+                    "SSE endpoint failed: http://%s:%s%s (%s: %s)",
                     self.host,
                     self.port,
                     self.path,
@@ -373,38 +414,38 @@ class StreamableHttpEndpoint:
 
 async def run_proxy(
     upstream_url: str,
-    http_host: str,
-    http_port: int,
-    http_path: str,
+    sse_host: str,
+    sse_port: int,
+    sse_path: str,
 ) -> None:
     bridge = BridgeSupervisor(upstream_url)
     stdio_server = build_mcp_server(bridge, "allurix-bridge")
-    http_endpoint = StreamableHttpEndpoint(bridge, http_host, http_port, http_path)
+    sse_endpoint = SseEndpoint(bridge, sse_host, sse_port, sse_path)
     await bridge.start()
-    await http_endpoint.start()
+    await sse_endpoint.start()
     try:
         await stdio_server.run_stdio_async()
     finally:
-        await http_endpoint.close()
+        await sse_endpoint.close()
         await bridge.close()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream", default="http://127.0.0.1:19131/sse")
-    parser.add_argument("--http-host", default="127.0.0.1")
-    parser.add_argument("--http-port", type=int, default=19132)
-    parser.add_argument("--http-path", default="/sse")
+    parser.add_argument("--sse-host", default="127.0.0.1")
+    parser.add_argument("--sse-port", type=int, default=19132)
+    parser.add_argument("--sse-path", default="/sse")
     args = parser.parse_args()
-    if not args.http_path.startswith("/"):
-        parser.error("--http-path must start with /")
+    if not args.sse_path.startswith("/"):
+        parser.error("--sse-path must start with /")
     logging.basicConfig(level=logging.WARNING)
     asyncio.run(
         run_proxy(
             args.upstream,
-            args.http_host,
-            args.http_port,
-            args.http_path,
+            args.sse_host,
+            args.sse_port,
+            args.sse_path,
         )
     )
 

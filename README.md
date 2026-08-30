@@ -1,7 +1,7 @@
 # Allurix MCStudio MCP Bridge
 
 A Windows-only local bridge that exposes MCStudio Apollo projects, logs, and
-operations through a Codex-owned stdio MCP proxy with a local Streamable HTTP
+operations through a Codex-owned stdio MCP proxy with a local legacy SSE
 endpoint.
 
 Allurix runs inside MCStudio and uses MCStudio's loaded Apollo project model.
@@ -16,7 +16,7 @@ Codex
   -> stable local allurix_bridge tool
 
 mcp_proxy.py
-  -> Streamable HTTP MCP at 127.0.0.1:19132/sse
+  -> legacy SSE MCP at 127.0.0.1:19132/sse
   -> legacy SSE client to 127.0.0.1:19131/sse
   -> injected MCStudio allurix_bridge
   -> tool DLLs in mcstudio_bridge/bin/tools
@@ -27,7 +27,7 @@ mcp_proxy.py
 It stops the native MCP server, registers `allurix_bridge`, and starts the
 native server again. Codex starts `mcp_proxy.py` through stdio. The proxy
 registers its local `allurix_bridge` tool before attempting any upstream
-connection, starts Streamable HTTP on `19132/sse`, then connects to the native
+connection, starts legacy SSE on `19132/sse`, then connects to the native
 legacy SSE server on `19131/sse` in the background.
 
 The supervisor states are `starting`, `connecting`, `waiting_for_bridge`,
@@ -98,7 +98,7 @@ locked. Tool DLLs are loaded from bytes and can be refreshed with the bridge's
 Register the local stdio proxy:
 
 ```powershell
-codex mcp add allurix-bridge -- C:\Python314\python.exe D:\_Development\_Nightbreak\allurix-netease-mcp\mcp_proxy.py --upstream http://127.0.0.1:19131/sse --http-host 127.0.0.1 --http-port 19132 --http-path /sse
+codex mcp add allurix-bridge -- C:\Python314\python.exe D:\_Development\_Nightbreak\allurix-netease-mcp\mcp_proxy.py --upstream http://127.0.0.1:19131/sse --sse-host 127.0.0.1 --sse-port 19132 --sse-path /sse
 codex mcp list
 ```
 
@@ -113,15 +113,15 @@ command = "C:\\Python314\\python.exe"
 args = [
   "D:\\_Development\\_Nightbreak\\allurix-netease-mcp\\mcp_proxy.py",
   "--upstream", "http://127.0.0.1:19131/sse",
-  "--http-host", "127.0.0.1",
-  "--http-port", "19132",
-  "--http-path", "/sse"
+  "--sse-host", "127.0.0.1",
+  "--sse-port", "19132",
+  "--sse-path", "/sse"
 ]
 startup_timeout_sec = 10
 tool_timeout_sec = 120
 ```
 
-`127.0.0.1:19132/sse` is a Streamable HTTP endpoint despite its path name. It
+`127.0.0.1:19132/sse` is a legacy SSE endpoint. It
 does not expose a `/messages/` endpoint. Port `19131` remains MCStudio's legacy
 SSE endpoint.
 
@@ -311,7 +311,7 @@ C++/CLI bootstrap.
 ## Repository layout
 
 ```text
-mcp_proxy.py          Current Codex stdio + Streamable HTTP proxy
+mcp_proxy.py          Current Codex stdio + legacy SSE proxy
 apollo_core/          Explicit read-oriented Apollo helpers
 mcstudio_bridge/      Bridge, injector, bootstrapper, and MCP tool sources
 ```
